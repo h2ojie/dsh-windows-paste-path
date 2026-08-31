@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+build/
+*.tmp
+.DS_Store
+Thumbs.db
+*.user
+.vs/
+CMakeFiles/
+CMakeCache.txt

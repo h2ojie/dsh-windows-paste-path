@@ -1,0 +1,13 @@
+# Profile composition patch for this bundle (referenced by package.json
+# `dsh.bundle.patch`). `dsh plugin --profile web add <dir>` auto-registers this
+# package as a profile bundle layer, and the harness applies this patch at boot
+# to mount the Host half (lib/index.js) as a cordis plugin.
+#
+# Format matches the DSH harness overlay-patch loader:
+#   https://...  (see deepseek-harness/packages/boot/app-boot/lib/index.js)
+# `name` is resolved relative to this file (resolveRelativePluginPaths), so
+# `./lib/index.js` points at this package's Host half.
+
+- insert:
+    - id: dsh-windows-paste-path
+      name: ./lib/index.js
