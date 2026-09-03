@@ -9,9 +9,11 @@ Win32 剪贴板监听器，为 DSH 插件提供「当前复制了哪些文件/�
 | **Python（推荐，无需编译）** | `dsh_clipboard_hook.py` | 无需，标准库 `ctypes` | 已实机验证 |
 | C++（可选） | `src/*.cpp` + `CMakeLists.txt` | 需 Visual Studio 2022 + CMake | 未在本机编译 |
 
-两者行为完全一致：监听 `WM_CLIPBOARDUPDATE` → `CF_HDROP` 枚举 → 文件/目录分类 →
-写 JSON 快照到 `%LOCALAPPDATA%\DshClipboardHook\clipboard-paths.json`（带显式 ACL 的
-目录 + 原子替换）。没有 C++ 编译环境时直接用 Python 版即可。
+两者行为完全一致：监听 `WM_CLIPBOARDUPDATE` → 在剪贴板锁内只复制 `CF_HDROP`
+路径字符串 → **立即释放剪贴板锁** → 文件/目录分类 → 写 JSON 快照到
+`%LOCALAPPDATA%\DshClipboardHook\clipboard-paths.json`（带显式 ACL 的目录 + 原子替换）。
+把可能阻塞的网络路径属性查询放到锁外，避免一条失联 UNC/映射盘路径卡住整个系统的粘贴。
+没有 C++ 编译环境时直接用 Python 版即可。
 
 ---
 
@@ -81,8 +83,9 @@ cmake --build build --config Release
 
 ## 运维要点
 
-- **剪贴板锁必须释放**：`refresh_clipboard_paths` 用 `try/finally` 保证
-  `CloseClipboard` 一定执行（否则整桌剪贴板会被本进程卡死）。
+- **剪贴板锁必须尽快释放**：`refresh_clipboard_paths` 在锁内只复制 `CF_HDROP`
+  路径，并用 `try/finally` 保证 `CloseClipboard` 一定执行；`GetFileAttributesW`
+  分类严格在锁外进行。否则失联网络路径可能让本进程长期占锁，卡住整桌所有粘贴。
 - 非文件类复制（纯文本、图像等）会**清空**快照，避免后续粘贴插入陈旧路径。
 - 状态目录用显式 SDDL ACL 创建（`D:PAI` + `BA/SY/CO`），避免继承到父目录可能过宽
   的权限而泄露路径。

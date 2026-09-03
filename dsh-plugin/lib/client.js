@@ -38,6 +38,7 @@ window.__ModuleLoader__.load({
     }
     let supportedMediaTypes = FALLBACK_MEDIA_TYPES
     let pasteSeq = 0
+    let insertingText = false
 
     function asElement(target) {
       if (target instanceof Element) return target
@@ -84,14 +85,11 @@ window.__ModuleLoader__.load({
       const items = clipboardData.items ? Array.from(clipboardData.items) : []
       for (const item of items) {
         if (item.kind !== 'file') continue
-        const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null
-        const mediaType = (file && file.type) || item.type || (file && mediaTypeFromName(file.name)) || ''
-        candidates.push({ mediaType })
-      }
-      if (candidates.length === 0 && clipboardData.files) {
-        for (const file of Array.from(clipboardData.files)) {
-          candidates.push({ mediaType: file.type || mediaTypeFromName(file.name) || '' })
-        }
+        // Reading kind/type is metadata-only. Never call getAsFile() or touch
+        // clipboardData.files here: Chromium may synchronously materialize an
+        // Explorer folder's CF_HDROP and spin the renderer before our handler
+        // can prevent the native paste.
+        candidates.push({ mediaType: item.type || '' })
       }
       return candidates
     }
@@ -166,9 +164,11 @@ window.__ModuleLoader__.load({
       const items = clipboardData.items ? Array.from(clipboardData.items) : []
       if (items.some((item) => item.kind === 'file')) return true
       const html = clipboardText(clipboardData, 'text/html')
-      if (/file:\/\//i.test(html)) return true
-      const plain = decodeHtmlEntities(clipboardText(clipboardData, 'text/plain')).trim()
-      return isWindowsAbsPath(plain) && !plain.includes('\n')
+      // A plain Windows-looking string is still ordinary text. Treating
+      // `C:\\...` as a file-drop signal steals normal text paste, blocks the
+      // native composer, and adds a two-second Host round trip. Explorer's
+      // mapped-drive fallback carries file:// HTML, which remains sufficient.
+      return /file:\/\//i.test(html)
     }
 
     function shouldIntercept(candidates, looksLikeFiles) {
@@ -218,8 +218,15 @@ window.__ModuleLoader__.load({
       // Mapped-drive pastes often keep file:// HTML on the system clipboard.
       // Never dispatch a synthetic ClipboardEvent: Chromium may ignore our
       // DataTransfer and re-read that HTML, which duplicates the path and
-      // inserts &#x20; entities. insertText stays inside Lexical's model.
-      document.execCommand('insertText', false, text)
+      // inserts &#x20; entities. Some Chromium/extension combinations can surface
+      // execCommand's edit as a re-entrant paste; ignore only that synchronous
+      // insertion window so it cannot spin the renderer.
+      insertingText = true
+      try {
+        document.execCommand('insertText', false, text)
+      } finally {
+        insertingText = false
+      }
     }
 
     function resolveInsertTarget(fallbackNode) {
@@ -234,38 +241,42 @@ window.__ModuleLoader__.load({
     }
 
     function handlePaste(event) {
-      if (event.defaultPrevented) return
+      if (event.defaultPrevented || insertingText) return
 
       const clipboardData = event.clipboardData ?? (event.originalEvent && event.originalEvent.clipboardData)
       if (clipboardData == null) return
 
+      // Ordinary text paste must exit before getData(), getAsFile(), or any
+      // other clipboard payload read. Besides avoiding false positives, this
+      // keeps the plugin completely out of Chromium's synchronous clipboard
+      // materialization path unless the browser explicitly advertises files.
+      const types = clipboardData.types ? Array.from(clipboardData.types) : []
+      const advertisesFiles = types.includes('Files')
+      const advertisesUriList = types.includes('text/uri-list')
+      if (!advertisesFiles && !advertisesUriList) return
+
+      // URI-list alone can represent an ordinary link. A Files payload is
+      // inspected only far enough to preserve DSH's supported-image path; the
+      // real absolute paths still come exclusively from the Hook snapshot.
+      if (!advertisesFiles) return
       const candidates = fileCandidatesFrom(clipboardData)
-      const looksLikeFiles = clipboardLooksLikeFileDrop(clipboardData)
-      if (!shouldIntercept(candidates, looksLikeFiles)) return
+      if (candidates.some((candidate) => isSupportedImageType(candidate.mediaType))) return
 
       event.preventDefault()
       event.stopPropagation()
       if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()
 
       const seq = ++pasteSeq
-      const fallbackPaths = pathsFromClipboardText(clipboardData)
       const input = resolveInsertTarget(event.target)
 
       fetchPaths()
         .then((paths) => {
-          if (seq !== pasteSeq) return
-          const segments = paths.length > 0 ? paths : fallbackPaths
-          if (segments.length === 0) return
+          if (seq !== pasteSeq || paths.length === 0) return
           const target = resolveInsertTarget(event.target) ?? input
           if (!isUsableComposerInput(target)) return
-          insertPlainText(target, segments.join('\n'))
+          insertPlainText(target, paths.join('\n'))
         })
-        .catch(() => {
-          if (seq !== pasteSeq || fallbackPaths.length === 0) return
-          const target = resolveInsertTarget(event.target) ?? input
-          if (!isUsableComposerInput(target)) return
-          insertPlainText(target, fallbackPaths.join('\n'))
-        })
+        .catch(() => {})
     }
 
     function apply(ctx) {

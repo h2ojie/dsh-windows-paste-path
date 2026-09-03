@@ -8,16 +8,17 @@ DSH Web 插件，把「复制文件/文件夹」的粘贴动作转换为纯文�
   `connection.fetch.register` 的路由，继承 Harness 的 Host/Origin 信任围栏与
   浏览器鉴权：
   - `GET /api/clipboard/paths`：读 `%LOCALAPPDATA%\DshClipboardHook\clipboard-paths.json`，
-    校验每个条目（`kind`/`path` 合法、控制字符拒绝、mediaType 格式正则），再用
-    `fs.stat` 做 **1.5s 预算、单条 400ms、并发 16** 的存在性复核（文件系统判定
-    `kind` 优先于快照记录）。缺失/不可达/超时的一律丢弃。映射盘超时更宽一些。
+    校验每个条目（`kind`/`path` 合法、控制字符拒绝、mediaType 格式正则），然后直接
+    返回 Hook 已分类的快照。Host 不再重复 `fs.stat`，避免映射盘/UNC 路径让每次粘贴
+    再产生一轮网络文件系统等待。
   - `GET /api/clipboard/media-types`：把 `ctx.attachments.imageLimits.mediaTypes`
     透传给浏览器，作为「哪些图像类型被支持」的权威来源。
 - `lib/client.js` — **Client 半**（浏览器，经 `window.__ModuleLoader__.load` 加载）。
-  捕获阶段拦截 `paste`：文件/目录数据、`file://` HTML、或纯文本 Windows 绝对路径，
-  且**不含受支持的图像**时，向 Host 取真实路径，用 `document.execCommand('insertText')`
-  插入。不派发合成 `ClipboardEvent`，避免 Chromium 把系统剪贴板里的 HTML（含
-  `&#x20;`）再贴一遍。
+  捕获阶段先检查廉价的 `clipboardData.types`；看到 `Files` 时只读取 item 的 `kind/type`
+  以保留 DSH 原生图片粘贴，绝不调用 `getAsFile()`、读取 `files` 或 `getData()` 文本回退。
+  真实绝对路径
+  统一以 Hook/Host 快照为准，再用 `document.execCommand('insertText')` 插入。普通文本完全
+  交给 DSH 原生粘贴。
 
 > 两份入口声明：
 > - `exports["./client"]` + `dsh.client: { platform: "web", immediately: true }`

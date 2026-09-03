@@ -27,12 +27,6 @@ const MEDIA_TYPES_ROUTE = '/api/clipboard/media-types'
 const STATE_FILE_NAME = 'clipboard-paths.json'
 const STATE_DIRECTORY_NAME = 'DshClipboardHook'
 
-// Admission budget for the existence recheck. Unreachable network shares can
-// make a single stat() hang for tens of seconds, so the whole batch is bounded.
-const TOTAL_VERIFY_BUDGET_MS = 1500
-const PER_ITEM_TIMEOUT_MS = 400
-const VERIFY_CONCURRENCY = 16
-
 // Upper bounds on what we are willing to read and hand back.
 const MAX_STATE_FILE_BYTES = 4 * 1024 * 1024
 const MAX_ITEMS = 256
@@ -134,71 +128,6 @@ function validateItem(candidate) {
   return validated
 }
 
-/**
- * Bound a single stat() against a timeout.
- *
- * Node's `fs.stat` has no timeout of its own and an unreachable UNC share can
- * block far longer than a paste is allowed to wait.
- *
- * @param {string} path
- * @param {number} timeoutMs
- * @returns {Promise<'directory' | 'file' | undefined>}
- */
-async function statKindWithTimeout(path, timeoutMs) {
-  let timer
-  try {
-    return await Promise.race([
-      nodeFs.promises.stat(path).then(
-        (stat) => (stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : undefined),
-        () => undefined,
-      ),
-      new Promise((resolve) => {
-        timer = setTimeout(() => resolve(undefined), timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer)
-    }
-  }
-}
-
-/**
- * Recheck that every path still exists and still has the recorded kind.
- *
- * This is deliberately not a freshness check: there is no timestamp, sequence
- * number, or consumption marker. It exists so a snapshot left behind by an
- * exited hook can never surface a path that has since been deleted or retyped.
- *
- * @param {{ kind: string, path: string, mediaType?: string }[]} items
- * @returns {Promise<object[]>} confirmed items in snapshot order
- */
-async function verifyItems(items) {
-  const startedAt = Date.now()
-  const confirmed = []
-
-  for (let offset = 0; offset < items.length; offset += VERIFY_CONCURRENCY) {
-    const remaining = TOTAL_VERIFY_BUDGET_MS - (Date.now() - startedAt)
-    if (remaining <= 0) {
-      break
-    }
-    const batch = items.slice(offset, offset + VERIFY_CONCURRENCY)
-    const actualKinds = await Promise.all(
-      batch.map((item) => statKindWithTimeout(item.path, Math.min(PER_ITEM_TIMEOUT_MS, remaining))),
-    )
-    for (let index = 0; index < batch.length; index += 1) {
-      const actualKind = actualKinds[index]
-      if (actualKind === undefined) {
-        continue  // missing, inaccessible, or timed out: never hand it back
-      }
-      // The filesystem wins over the recorded kind.
-      confirmed.push({ ...batch[index], kind: actualKind })
-    }
-  }
-
-  return confirmed
-}
-
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -238,8 +167,11 @@ export function createPathsRouteHandler(resolveStateFile = resolveStateFilePath)
       }
     }
 
-    const items = await verifyItems(validated)
-    return jsonResponse({ supported: true, truncated: false, items })
+    // The Hook classified these paths when it created the snapshot. Do not
+    // repeat filesystem metadata I/O on the paste request: a second stat of a
+    // mapped drive or UNC share adds visible latency and can leave an
+    // uncancellable libuv operation behind after a timeout.
+    return jsonResponse({ supported: true, truncated: false, items: validated })
   }
 }
 

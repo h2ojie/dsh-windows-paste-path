@@ -325,21 +325,34 @@ def media_type_for_path(path):
     return EXTENSION_HINTS.get(path[dot:].lower())
 
 
-def collect_entries(hdrop):
-    """Enumerate CF_HDROP and classify each entry."""
+def collect_paths(hdrop):
+    """Copy CF_HDROP path strings while the clipboard handle is valid.
+
+    This function deliberately performs no filesystem I/O. In particular,
+    GetFileAttributesW on a disconnected mapped drive or unreachable UNC share
+    can block indefinitely, so it must never run while OpenClipboard's
+    desktop-wide lock is held.
+    """
     count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
     if not count:
         return []
 
     buffer = ctypes.create_unicode_buffer(32768)
-    items = []
+    paths = []
     for index in range(count):
         copied = shell32.DragQueryFileW(hdrop, index, buffer, 32768)
         if not copied or copied >= 32768:
             continue
         path = buffer[:copied]
-        if not path:
-            continue
+        if path:
+            paths.append(path)
+    return paths
+
+
+def classify_entries(paths):
+    """Classify copied paths after CloseClipboard has released the lock."""
+    items = []
+    for path in paths:
         attributes = kernel32.GetFileAttributesW(path)
         if attributes == INVALID_FILE_ATTRIBUTES:
             continue  # deleted, virtual-only, or inaccessible: drop it
@@ -378,7 +391,7 @@ def refresh_clipboard_paths(owner_window):
         return False
     _refresh_in_progress = True
 
-    items = []
+    paths = []
     success = False
     try:
         if open_clipboard(owner_window):
@@ -386,7 +399,11 @@ def refresh_clipboard_paths(owner_window):
                 if user32.IsClipboardFormatAvailable(CF_HDROP):
                     data = user32.GetClipboardData(CF_HDROP)
                     if data:
-                        items = collect_entries(data)
+                        # HDROP is owned by the clipboard and becomes invalid
+                        # after CloseClipboard, so copy only its strings here.
+                        # Classification happens below, after releasing the
+                        # desktop-wide lock.
+                        paths = collect_paths(data)
                         success = True
                 else:
                     # A non-file copy (text, image, and so on) clears the
@@ -395,6 +412,7 @@ def refresh_clipboard_paths(owner_window):
                     success = True
             finally:
                 user32.CloseClipboard()
+        items = classify_entries(paths)
         # Always persist, including the empty case, so a stale snapshot cannot
         # outlive the clipboard state that produced it.
         written = write_state_file(items)

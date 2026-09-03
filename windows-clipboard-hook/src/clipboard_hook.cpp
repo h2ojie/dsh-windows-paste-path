@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace wfp {
@@ -108,10 +109,14 @@ std::wstring mediaTypeForPath(const std::wstring& path) {
 }
 
 /**
- * Enumerate CF_HDROP and classify each entry.
- * @param drop - the HDROP handle owned by the clipboard; never released here.
+ * Copy CF_HDROP path strings while its clipboard-owned handle is valid.
+ *
+ * This function deliberately performs no filesystem I/O. GetFileAttributesW
+ * on a disconnected mapped drive or unreachable UNC share can block
+ * indefinitely, so it must never run while the desktop-wide clipboard lock is
+ * held.
  */
-bool collectEntries(HDROP drop, StateSnapshot& snapshot) {
+bool collectPaths(HDROP drop, std::vector<std::wstring>& paths) {
     const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
     if (count == 0) {
         return false;
@@ -119,7 +124,7 @@ bool collectEntries(HDROP drop, StateSnapshot& snapshot) {
 
     std::wstring buffer;
     buffer.resize(kPathBufferChars);
-    snapshot.items.clear();
+    paths.clear();
 
     for (UINT index = 0; index < count; ++index) {
         const UINT copied = DragQueryFileW(drop, index, buffer.data(),
@@ -129,10 +134,18 @@ bool collectEntries(HDROP drop, StateSnapshot& snapshot) {
         }
 
         std::wstring path(buffer.data(), copied);
-        if (path.empty()) {
-            continue;
+        if (!path.empty()) {
+            paths.push_back(std::move(path));
         }
+    }
 
+    return !paths.empty();
+}
+
+/** Classify process-owned paths after CloseClipboard releases the lock. */
+void classifyEntries(const std::vector<std::wstring>& paths, StateSnapshot& snapshot) {
+    snapshot.items.clear();
+    for (const std::wstring& path : paths) {
         const DWORD attributes = GetFileAttributesW(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) {
             continue;  // deleted, virtual-only, or inaccessible: drop it
@@ -144,10 +157,8 @@ bool collectEntries(HDROP drop, StateSnapshot& snapshot) {
         if (!item.isDirectory) {
             item.mediaType = mediaTypeForPath(path);
         }
-        snapshot.items.push_back(item);
+        snapshot.items.push_back(std::move(item));
     }
-
-    return !snapshot.items.empty();
 }
 
 LRESULT CALLBACK hookWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -196,17 +207,21 @@ bool refreshClipboardPaths(HWND ownerWindow) {
     gRefreshInProgress = true;
 
     StateSnapshot snapshot;
+    std::vector<std::wstring> paths;
     bool succeeded = false;
 
     {
         ClipboardLock lock;
         if (lock.acquire(ownerWindow)) {
             if (IsClipboardFormatAvailable(CF_HDROP) != FALSE) {
-                // The HDROP belongs to the clipboard: CloseClipboard releases it.
+                // The HDROP belongs to the clipboard and becomes invalid when
+                // CloseClipboard runs. Copy only the path strings here;
+                // potentially blocking filesystem classification must happen
+                // after the RAII guard releases the desktop-wide lock.
                 // DragFinish must NOT be called on a clipboard HDROP.
                 const HANDLE data = GetClipboardData(CF_HDROP);
                 if (data != nullptr) {
-                    succeeded = collectEntries(static_cast<HDROP>(data), snapshot);
+                    succeeded = collectPaths(static_cast<HDROP>(data), paths);
                 }
             } else {
                 // A non-file copy (text, image, and so on) intentionally clears
@@ -217,6 +232,7 @@ bool refreshClipboardPaths(HWND ownerWindow) {
         }
     }
 
+    classifyEntries(paths, snapshot);
     // Always persist, including the empty case, so a stale snapshot cannot
     // outlive the clipboard state that produced it.
     const bool persisted = writeStateFile(snapshot);

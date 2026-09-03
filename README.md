@@ -31,7 +31,7 @@ dsh-windows-paste-path/
 ```
 
 - Hook：监听 `WM_CLIPBOARDUPDATE`，把 `CF_HDROP` 快照写到 `%LOCALAPPDATA%\DshClipboardHook\clipboard-paths.json`。
-- Host 半：读快照，校验路径，再 `fs.stat` 复核（默认 1.5s 预算，兼顾映射盘）。
+- Host 半：读快照并校验字段后直接返回；不重复 `fs.stat`，避免网络路径二次等待。
 - Client 半：捕获阶段拦截文件/目录粘贴，向 Host 取路径，用 `insertText` 插入纯文本。不派发合成 `ClipboardEvent`，避免 Chromium 把系统剪贴板里的 `file://` HTML 再贴一遍。
 
 ## 安装
