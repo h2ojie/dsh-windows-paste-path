@@ -2,7 +2,7 @@
 
 让 DSH Web 在 Windows 上支持「复制文件/文件夹 → 粘贴为绝对路径」。
 
-在资源管理器里复制文件或文件夹后，到 DSH Web 输入框 `Ctrl+V`，会插入一行一个原始绝对路径：
+在资源管理器里复制文件或文件夹后，到 DSH Web 输入框按 **Alt+V**，会从 Hook 快照插入一行一个原始绝对路径。UNC / 映射盘文件夹优先用此方式，避免 Chromium 原生粘贴卡住；普通 `Ctrl+V` 的文字、图片行为不变：
 
 ```
 C:\work\demo\report.pdf
@@ -32,7 +32,7 @@ dsh-windows-paste-path/
 
 - Hook：监听 `WM_CLIPBOARDUPDATE`，把 `CF_HDROP` 快照写到 `%LOCALAPPDATA%\DshClipboardHook\clipboard-paths.json`。
 - Host 半：读快照并校验字段后直接返回；不重复 `fs.stat`，避免网络路径二次等待。
-- Client 半：捕获阶段拦截文件/目录粘贴，向 Host 取路径，用 `insertText` 插入纯文本。不派发合成 `ClipboardEvent`，避免 Chromium 把系统剪贴板里的 `file://` HTML 再贴一遍。
+- Client 半：只处理输入框的 Alt+V，向 Host 取路径，用 `insertText` 插入纯文本。不监听 paste、不读取浏览器剪贴板、不替换 Ctrl+V；Ctrl+V 的支持范围与错误提示由 DSH 原生逻辑决定。浏览器在事件前卡住时，DSH 可能来不及提示。
 
 ## 安装
 
@@ -57,8 +57,9 @@ dsh plugin --profile web add link:%CD%\dsh-plugin
 
 1. 确认 Hook 进程在跑。
 2. 在资源管理器复制文件或文件夹（本地盘或映射盘都可以）。
-3. 焦点放在 DSH 输入框，`Ctrl+V`。
-4. 输入框出现绝对路径；图片文件仍按图片附件处理。
+3. 焦点放在 DSH 输入框，按 `Alt+V`。
+4. 输入框出现绝对路径，请核对它是否与刚复制的一致。Hook 停止或更新受阻时可能返回旧快照。
+5. 粘贴文字或图片附件仍用 `Ctrl+V`；`Alt+V` 只负责路径。
 
 ## 卸载
 
