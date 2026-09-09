@@ -200,6 +200,7 @@ export function apply(ctx) {
     () => ctx.connection.fetch.register({
       path: PATHS_ROUTE,
       methods: ['GET'],
+      requestBody: 'buffered',
       fetch: createPathsRouteHandler(resolveStateFilePath),
     }),
     'dsh-windows-paste-path: paths route',
@@ -209,6 +210,7 @@ export function apply(ctx) {
     () => ctx.connection.fetch.register({
       path: MEDIA_TYPES_ROUTE,
       methods: ['GET'],
+      requestBody: 'buffered',
       fetch: createMediaTypesRouteHandler(ctx.attachments),
     }),
     'dsh-windows-paste-path: media-types route',
